@@ -6,7 +6,6 @@ package cache
 import (
 	"compress/gzip"
 	"context"
-	"encoding/json"
 	"io"
 
 	"github.com/containerd/containerd/content"
@@ -24,7 +23,7 @@ import (
 func init() {
 	additionalAnnotations = append(
 		additionalAnnotations,
-		nydusify.LayerAnnotationNydusBlob, nydusify.LayerAnnotationNydusBootstrap, nydusify.LayerAnnotationNydusBlobIDs,
+		nydusify.LayerAnnotationNydusBlob, nydusify.LayerAnnotationNydusBootstrap,
 	)
 }
 
@@ -125,11 +124,6 @@ func MergeNydus(ctx context.Context, ref ImmutableRef, comp compression.Config, 
 		return nil, errors.Wrap(err, "get info from content store")
 	}
 
-	blobIDsBytes, err := json.Marshal(blobIDs)
-	if err != nil {
-		return nil, errors.Wrap(err, "marshal blob ids")
-	}
-
 	desc := ocispecs.Descriptor{
 		Digest:    compressedDgst,
 		Size:      info.Size,
@@ -139,7 +133,6 @@ func MergeNydus(ctx context.Context, ref ImmutableRef, comp compression.Config, 
 			// Use this annotation to identify nydus bootstrap layer.
 			nydusify.LayerAnnotationNydusBootstrap: "true",
 			// Track all blob digests for nydus snapshotter.
-			nydusify.LayerAnnotationNydusBlobIDs: string(blobIDsBytes),
 		},
 	}
 

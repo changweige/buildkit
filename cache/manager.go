@@ -615,6 +615,12 @@ func (cm *cacheManager) New(ctx context.Context, s ImmutableRef, sess session.Gr
 		}); rerr != nil {
 			return nil, rerr
 		}
+	} else if cm.Snapshotter.Name() == "nydus" && parent != nil {
+		if rerr := parent.withRemoteSnapshotLabelsNydusMode(ctx, sess, func() {
+			err = cm.Snapshotter.Prepare(ctx, snapshotID, parentSnapshotID)
+		}); rerr != nil {
+			return nil, rerr
+		}
 	} else {
 		err = cm.Snapshotter.Prepare(ctx, snapshotID, parentSnapshotID)
 	}

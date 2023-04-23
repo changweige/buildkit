@@ -25,6 +25,8 @@ import (
 	"github.com/containerd/containerd/snapshots/overlay/overlayutils"
 	snproxy "github.com/containerd/containerd/snapshots/proxy"
 	fuseoverlayfs "github.com/containerd/fuse-overlayfs-snapshotter"
+	nydusconfig "github.com/containerd/nydus-snapshotter/config"
+	nydussn "github.com/containerd/nydus-snapshotter/snapshot"
 	sgzfs "github.com/containerd/stargz-snapshotter/fs"
 	sgzconf "github.com/containerd/stargz-snapshotter/fs/config"
 	sgzlayer "github.com/containerd/stargz-snapshotter/fs/layer"
@@ -433,6 +435,21 @@ func snapshotterFactory(commonRoot string, cfg config.OCIConfig, sm *session.Man
 				filepath.Join(root, "snapshotter"),
 				fs, remotesn.AsynchronousRemove, remotesn.NoRestore)
 		}
+	case "nydus":
+		snFactory.New = func(root string) (ctdsnapshot.Snapshotter, error) {
+			config := nydusconfig.SnapshotterConfig{}
+			config.FillUpWithDefaults()
+			config.Root = root
+			if err := nydusconfig.ValidateConfig(&config); err != nil {
+				return nil, errors.Wrapf(err, "validate nydus configurations")
+			}
+
+			if err := nydusconfig.ProcessConfigurations(&config); err != nil {
+				return nil, errors.Wrap(err, "process nydus configurations")
+			}
+
+			return nydussn.NewSnapshotter(context.TODO(), &config)
+		}
 	default:
 		return snFactory, errors.Errorf("unknown snapshotter name: %q", name)
 	}
@@ -460,7 +477,7 @@ const (
 	// the target image.
 	targetImageLayersLabel = "containerd.io/snapshot/remote/stargz.layers"
 
-	// targetSessionLabel is a labeld which contains session IDs usable for
+	// targetSessionLabel is a label which contains session IDs usable for
 	// authenticating the target snapshot.
 	targetSessionLabel = "containerd.io/snapshot/remote/stargz.session"
 )

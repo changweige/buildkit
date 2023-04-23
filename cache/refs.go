@@ -930,6 +930,12 @@ func (sr *immutableRef) Mount(ctx context.Context, readonly bool, s session.Grou
 		}); err != nil {
 			return nil, err
 		}
+	} else if sr.cm.Snapshotter.Name() == "nydus" {
+		if err := sr.withRemoteSnapshotLabelsNydusMode(ctx, s, func() {
+			mnt, rerr = sr.mount(ctx, s)
+		}); err != nil {
+			return nil, err
+		}
 	} else {
 		mnt, rerr = sr.mount(ctx, s)
 	}
@@ -960,6 +966,18 @@ func (sr *immutableRef) Extract(ctx context.Context, s session.Group) (rerr erro
 		return rerr
 	}
 
+	if sr.cm.Snapshotter.Name() == "nydus" {
+		if err := sr.withRemoteSnapshotLabelsNydusMode(ctx, s, func() {
+			if rerr = sr.prepareRemoteSnapshotNydusMode(ctx, s); rerr != nil {
+				return
+			}
+			rerr = sr.unlazy(ctx, sr.descHandlers, sr.progress, s, true)
+		}); err != nil {
+			return err
+		}
+		return rerr
+	}
+
 	return sr.unlazy(ctx, sr.descHandlers, sr.progress, s, true)
 }
 
@@ -971,7 +989,7 @@ func (sr *immutableRef) withRemoteSnapshotLabelsStargzMode(ctx context.Context, 
 		if err != nil && !errdefs.IsNotFound(err) {
 			return err
 		} else if errdefs.IsNotFound(err) {
-			continue // This snpashot doesn't exist; skip
+			continue // This snapshot doesn't exist; skip
 		} else if _, ok := info.Labels["containerd.io/snapshot/remote"]; !ok {
 			continue // This isn't a remote snapshot; skip
 		}
@@ -1091,10 +1109,91 @@ func makeTmpLabelsStargzMode(labels map[string]string, s session.Group) (fields 
 	return
 }
 
+func (sr *immutableRef) withRemoteSnapshotLabelsNydusMode(ctx context.Context, s session.Group, f func()) error {
+	dhs := sr.descHandlers
+	for _, r := range sr.layerChain() {
+		r := r
+		info, err := r.cm.Snapshotter.Stat(ctx, r.getSnapshotID())
+		if err != nil && !errdefs.IsNotFound(err) {
+			return err
+		} else if errdefs.IsNotFound(err) {
+			continue // This snapshot doesn't exist; skip
+		} else if _, ok := info.Labels["containerd.io/snapshot/remote"]; !ok {
+			continue // This isn't a remote snapshot; skip
+		}
+		dh := dhs[digest.Digest(r.getBlob())]
+		if dh == nil {
+			continue // no info passed; skip
+		}
+	}
+
+	f()
+
+	return nil
+}
+
+func (sr *immutableRef) prepareRemoteSnapshotNydusMode(ctx context.Context, s session.Group) error {
+	dhs := sr.descHandlers
+
+	for _, r := range sr.layerChain() {
+		r := r
+
+		snapshotID := r.getSnapshotID()
+		if _, err := r.cm.Snapshotter.Stat(ctx, snapshotID); err == nil {
+			continue
+		}
+
+		dh := dhs[digest.Digest(r.getBlob())]
+		if dh == nil {
+			return nil
+		}
+
+		defaultLabels := snapshots.FilterInheritedLabels(dh.SnapshotLabels)
+
+		if defaultLabels == nil {
+			defaultLabels = make(map[string]string)
+		}
+
+		// tmpFields, tmpLabels := makeTmpLe
+
+		defaultLabels["containerd.io/snapshot.ref"] = snapshotID
+
+		// Prepare remote snapshots
+		var (
+			key  = fmt.Sprintf("tmp-%s %s", identity.NewID(), r.getChainID())
+			opts = []snapshots.Opt{
+				snapshots.WithLabels(defaultLabels),
+			}
+		)
+		parentID := ""
+		if r.layerParent != nil {
+			parentID = r.layerParent.getSnapshotID()
+		}
+		if err := r.cm.Snapshotter.Prepare(ctx, key, parentID, opts...); err != nil {
+			if errdefs.IsAlreadyExists(err) {
+				// Check if the targeting snapshot ID has been prepared as
+				// a remote snapshot in the snapshotter.
+				_, err := r.cm.Snapshotter.Stat(ctx, snapshotID)
+				if err == nil { // usable as remote snapshot without unlazying.
+					// Try the next layer as well.
+					continue
+				}
+			}
+		}
+
+		// This layer and all upper layers cannot be prepared without unlazying.
+		break
+	}
+
+	return nil
+}
+
 func (sr *immutableRef) unlazy(ctx context.Context, dhs DescHandlers, pg progress.Controller, s session.Group, topLevel bool) error {
 	_, err := sr.sizeG.Do(ctx, sr.ID()+"-unlazy", func(ctx context.Context) (_ interface{}, rerr error) {
-		if _, err := sr.cm.Snapshotter.Stat(ctx, sr.getSnapshotID()); err == nil {
-			return nil, nil
+		if info, err := sr.cm.Snapshotter.Stat(ctx, sr.getSnapshotID()); err == nil {
+			if info.Kind == snapshots.KindCommitted {
+				return nil, nil
+			}
 		}
 
 		switch sr.kind() {
@@ -1232,7 +1331,19 @@ func (sr *immutableRef) unlazyLayer(ctx context.Context, dhs DescHandlers, pg pr
 
 	key := fmt.Sprintf("extract-%s %s", identity.NewID(), sr.getChainID())
 
-	err = sr.cm.Snapshotter.Prepare(ctx, key, parentID)
+	defaultLabels := snapshots.FilterInheritedLabels(dh.SnapshotLabels)
+
+	if defaultLabels == nil {
+		defaultLabels = make(map[string]string)
+	}
+
+	defaultLabels["containerd.io/snapshot.ref"] = sr.getSnapshotID()
+
+	opts := []snapshots.Opt{
+		snapshots.WithLabels(defaultLabels),
+	}
+
+	err = sr.cm.Snapshotter.Prepare(ctx, key, parentID, opts...)
 	if err != nil {
 		return err
 	}
@@ -1434,6 +1545,12 @@ func (sr *mutableRef) Mount(ctx context.Context, readonly bool, s session.Group)
 	var mnt snapshot.Mountable
 	if sr.cm.Snapshotter.Name() == "stargz" && sr.layerParent != nil {
 		if err := sr.layerParent.withRemoteSnapshotLabelsStargzMode(ctx, s, func() {
+			mnt, rerr = sr.mount(ctx, s)
+		}); err != nil {
+			return nil, err
+		}
+	} else if sr.cm.Snapshotter.Name() == "nydus" && sr.layerParent != nil {
+		if err := sr.layerParent.withRemoteSnapshotLabelsNydusMode(ctx, s, func() {
 			mnt, rerr = sr.mount(ctx, s)
 		}); err != nil {
 			return nil, err

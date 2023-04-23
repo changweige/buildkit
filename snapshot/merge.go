@@ -26,6 +26,7 @@ var hardlinkMergeSnapshotters = map[string]struct{}{
 var overlayBasedSnapshotters = map[string]struct{}{
 	"overlayfs": {},
 	"stargz":    {},
+	"nydus":     {},
 }
 
 type Diff struct {
